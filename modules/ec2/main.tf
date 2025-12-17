@@ -60,7 +60,7 @@ resource "aws_iam_instance_profile" "ec2_ssm_profile" {
 resource "aws_security_group" "app" {
   name        = "lab-app-sg"
   description = "Security group for app server (private subnet)"
-  vpc_id      =var.vpc_id
+  vpc_id      = var.vpc_id
 
 
   ### WEB通信を許可(form my ip)

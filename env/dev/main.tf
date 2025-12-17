@@ -12,10 +12,10 @@ module "ec2" {
 module "rds" {
   source = "../../modules/rds"
 
-  vpc_id            = module.network.vpc_id
+  vpc_id             = module.network.vpc_id
   private_subnet_ids = module.network.private_subnet_ids
   app_sg_id          = module.ec2.app_sg_id
-  
+
   username = "nojima"
   password = "nojima2358"
 }
