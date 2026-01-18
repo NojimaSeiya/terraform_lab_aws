@@ -65,7 +65,7 @@ resource "aws_db_instance" "db1" {
   instance_class = "db.t3.micro"
   multi_az       = true
 
-  username = var.username
+  username = var.db_username
   password = random_password.db.result
 
   db_subnet_group_name   = aws_db_subnet_group.db.name
@@ -82,40 +82,50 @@ resource "aws_db_instance" "db1" {
 
 }
 
+### SecretsManager用 KMS Key
+resource "aws_kms_key" "secrets" {
+  description = "KMS key for Secrets Manager (RDS credentials)"
+  deletion_window_in_days = 7
+
+  tags = {
+    Name = "lab-secrets-kms"
+    Env = "lab"
+  }
+}
+
+resource "aws_kms_alias" "secrets" {
+  name = "alias/lab-secrets"
+  target_key_id = aws_kms_key.secrets.key_id
+}
+
+
 ### ランダムパスワード生成
 resource "random_password" "db" {
-  length  = 24
-  special = true
+  length           = 24
+  special          = true
+  override_special = "!#$%&()*+,-.:;<=>?[]^_{|}~"
 }
 
 ### シークレット作成
-resource "aws_sebcretsmanager" "db" {
+resource "aws_secretsmanager_secret" "db" {
   name = "lab/rds/postgres/master"
+  kms_key_id = aws_kms_key.secrets.arn
 }
 
 ### バージョン作成
 resource "aws_secretsmanager_secret_version" "db" {
-  sercret_id = aws_secretsmanager_secret.db.id
+  secret_id = aws_secretsmanager_secret.db.id
 
-  secret_string = jdonencode({
+  secret_string = jsonencode({
     engine   = "postgres"
     host     = aws_db_instance.db1.address
     port     = aws_db_instance.db1.port
     dbname   = aws_db_instance.db1.db_name
-    username = var.name
+    username = var.db_username
     password = random_password.db.result
 
   })
 
-}
-
-### シークレットの紐づけ
-resource "aws_secretsmanager_secret_target_attachment" "db" {
-  secret_id   = aws_sebcretsmanager.id
-  target_id   = aws_db_instance.db1.id
-  target_type = "AWS::RDS::DBInstance"
-
-  depends_on = [aws_secretsmanager_secret_version.db]
 }
 
 ### lamda作成
@@ -124,7 +134,12 @@ resource "aws_serverlessapplicationrepository_cloudformation_stack" "rotation" {
 
   ### AWS提供のテンプレ
   application_id = "arn:aws:serverlessrepo:us-east-1:297356227824:applications/SecretsManagerRDSPostgreSQLRotationSingleUser"
-  capabilities   = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"]
+  capabilities = [
+    "CAPABILITY_IAM",
+    "CAPABILITY_NAMED_IAM",
+    "CAPABILITY_RESOURCE_POLICY"
+  ]
+
   parameters = { endpoint = "https://secretsmanager.ap-northeast-1.amazonaws.com"
     functionName        = "lab-postgres-rotation"
     vpcSubnetIds        = join(",", var.rotation_subnet_ids)
@@ -132,3 +147,19 @@ resource "aws_serverlessapplicationrepository_cloudformation_stack" "rotation" {
 
   }
 }
+
+### lamdaをシークレットに紐づけ
+resource "aws_secretsmanager_secret_rotation" "db" {
+  secret_id           = aws_secretsmanager_secret.db.id
+  rotation_lambda_arn = aws_serverlessapplicationrepository_cloudformation_stack.rotation.outputs["RotationLambdaARN"]
+
+  rotation_rules {
+    automatically_after_days = 30
+  }
+
+  depends_on = [
+    aws_secretsmanager_secret_version.db,
+    aws_serverlessapplicationrepository_cloudformation_stack.rotation
+  ]
+}
+

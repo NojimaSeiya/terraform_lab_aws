@@ -56,6 +56,35 @@ resource "aws_iam_instance_profile" "ec2_ssm_profile" {
   role = aws_iam_role.ec2_ssm_role.name
 }
 
+resource "aws_iam_role_policy" "ec2_read_db_secret" {
+  name = "ec2-read-db-secret"
+  role = aws_iam_role.ec2_ssm_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadRDSSecret"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+         Resource = "arn:aws:secretsmanager:ap-northeast-1:121333001740:secret:lab/rds/postgres/master-*"
+      },
+      {
+        Sid    = "DecryptSecretsWithKMS"
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt"
+        ]
+        Resource = var.secrets_kms_key_arn
+      }
+    ]
+  })
+}
+
+
 ### SG設定
 resource "aws_security_group" "app" {
   name        = "lab-app-sg"
@@ -63,20 +92,12 @@ resource "aws_security_group" "app" {
   vpc_id      = var.vpc_id
 
 
-  ### WEB通信を許可(form my ip)
-
+  ### WEB通信を許可(form alb)
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["106.72.191.107/32"]
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["106.72.191.107/32"]
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [var.alb_sg_id]
   }
 
   ### アウトバウンドは全許可
@@ -93,20 +114,22 @@ resource "aws_security_group" "app" {
   }
 }
 
-### EC2作成
-resource "aws_instance" "app1" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = "t3.micro"
-  subnet_id              = var.private_subnet_id
-  vpc_security_group_ids = [aws_security_group.app.id]
-  iam_instance_profile   = aws_iam_instance_profile.ec2_ssm_profile.name
+### 起動テンプレート作成
+resource "aws_launch_template" "app" {
+  name                   = "lab-app-lt"
+  image_id               = data.aws_ami.al2023.id
+  iam_instance_profile { name = aws_iam_instance_profile.ec2_ssm_profile.name }
+  instance_type = "t3.micro"
 
 
   ### パブリックIP無効化
-  associate_public_ip_address = false
+  network_interfaces {
+    associate_public_ip_address = false
+    security_groups             = [aws_security_group.app.id]
+  }
 
   ### 起動時にSSMエージェントとApacheをインストール＆起動
-  user_data = <<-EOF
+  user_data = base64encode(<<-EOF
               #! /bin/bash
 
               dnf install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
@@ -123,12 +146,33 @@ resource "aws_instance" "app1" {
               systemctl enable postgresql15
               systemctl start postgresql15
 
-              echo "Hello World from Terraform Web Server" > /var/www/html/index.html
-              EOF
+              TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+              INSTANCE_ID=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+              echo "Hello from  $${INSTANCE_ID}" > /var/www/html/index.html
 
-  tags = {
-    Name = "lab-app-1"
-    Env  = "lab"
-    Role = "app"
-  }
+              EOF
+  )
+
 }
+
+### ASG作成
+resource "aws_autoscaling_group" "app" {
+  name = "lab-app-asg"
+  launch_template { 
+    id  = aws_launch_template.app.id
+    version = "$Latest"
+    
+    }
+  vpc_zone_identifier       = var.private_subnet_ids
+  max_size                  = 6
+  min_size                  = 2
+  desired_capacity          = 2
+  health_check_grace_period = 300
+  health_check_type         = "EC2"
+  target_group_arns = [var.target_group_arn]
+
+
+}
+
+
+
